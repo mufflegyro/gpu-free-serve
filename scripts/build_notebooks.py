@@ -131,6 +131,35 @@ to add your own models — or set `MODEL` to a raw id:
         ),
         code("!python -m gpufree.server.serve --list"),
         code(
+            """
+# Some images (Kaggle today) ship a PyTorch built for a newer CUDA toolkit than
+# their torchaudio, so `import torchaudio` raises "compiled with different CUDA
+# versions" and takes vLLM down with it: vllm -> transformers ->
+# transformers.audio_utils -> torchaudio. Serving a text model needs no audio,
+# and transformers only imports torchaudio when it is present, so drop it — but
+# only when it is actually broken, so healthy images keep working.
+import importlib.util, subprocess, sys
+
+def _torchaudio_broken():
+    if importlib.util.find_spec("torchaudio") is None:
+        return False
+    try:
+        subprocess.run(
+            [sys.executable, "-c", "import torchaudio"],
+            check=True, capture_output=True, timeout=180,
+        )
+        return False
+    except subprocess.CalledProcessError:
+        return True
+
+if _torchaudio_broken():
+    print("torchaudio does not match this PyTorch build — removing it (vLLM needs no audio).")
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchaudio"], check=False)
+
+print("torchaudio installed:", importlib.util.find_spec("torchaudio") is not None)
+"""
+        ),
+        code(
             f"""
 MODEL = "qwen2.5-7b-awq"   # a catalog name, `org/model`, or `ollama:tag`
 TUNNEL = "cloudflare"      # "cloudflare" (no account) or "ngrok" (needs authtoken)
