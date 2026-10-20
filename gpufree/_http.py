@@ -141,9 +141,14 @@ def build_handler(
             self.send_header("Transfer-Encoding", "chunked")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
+            # read1() returns whatever the socket already has; read(n) keeps pulling
+            # chunks until it has n bytes, which holds SSE token events back until
+            # a whole CHUNK has accumulated (tokens then arrive in paragraph-sized
+            # bursts instead of one at a time).
+            read = getattr(resp, "read1", resp.read)
             try:
                 while True:
-                    chunk = resp.read(CHUNK)
+                    chunk = read(CHUNK)
                     if not chunk:
                         break
                     self.wfile.write(b"%X\r\n%s\r\n" % (len(chunk), chunk))
