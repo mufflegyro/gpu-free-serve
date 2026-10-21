@@ -204,14 +204,33 @@ class OllamaEngine(Engine):
         print(f"[gpufree] $ ollama serve (port {self.port})", flush=True)
         self.process = subprocess.Popen(["ollama", "serve"], env=env)
         self._wait_daemon(env)
-        # Notebooks swallow Ollama's progress bar, so warn before the long silence.
-        print(
-            f"[gpufree] Pulling {self.spec.id} (several GB; notebooks show no progress "
-            "bar for this, give it a few minutes)...",
-            flush=True,
-        )
-        _run(["ollama", "pull", self.spec.id], env=env)
+        if self._is_local(self.spec.id, env):
+            # Models imported with `ollama create` have no registry entry, so a
+            # pull would fail and take the whole serve down with it.
+            print(f"[gpufree] {self.spec.id} is already local; skipping the pull.", flush=True)
+        else:
+            # Notebooks swallow Ollama's progress bar, so warn before the long silence.
+            print(
+                f"[gpufree] Pulling {self.spec.id} (several GB; notebooks show no progress "
+                "bar for this, give it a few minutes)...",
+                flush=True,
+            )
+            _run(["ollama", "pull", self.spec.id], env=env)
         return self.process
+
+    @staticmethod
+    def _is_local(name: str, env: dict) -> bool:
+        """True when `name` is already in the local Ollama store."""
+        try:
+            out = subprocess.run(
+                ["ollama", "list"], env=env, capture_output=True, text=True, timeout=120
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        for line in out.stdout.splitlines()[1:]:
+            if line.split() and line.split()[0] == name:
+                return True
+        return False
 
     def _wait_daemon(self, env: dict, timeout: float = 120) -> None:
         deadline = time.time() + timeout
