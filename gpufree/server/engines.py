@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -218,19 +219,19 @@ class OllamaEngine(Engine):
             _run(["ollama", "pull", self.spec.id], env=env)
         return self.process
 
-    @staticmethod
-    def _is_local(name: str, env: dict) -> bool:
-        """True when `name` is already in the local Ollama store."""
+    def _is_local(self, name: str, env: dict) -> bool:
+        """True when `name` is already in the local Ollama store.
+
+        Asks the daemon over HTTP rather than parsing `ollama list`, which
+        truncates long model names in its NAME column.
+        """
         try:
-            out = subprocess.run(
-                ["ollama", "list"], env=env, capture_output=True, text=True, timeout=120
-            )
-        except (OSError, subprocess.SubprocessError):
+            with urllib.request.urlopen(f"{self.base_url}/api/tags", timeout=15) as resp:
+                payload = json.loads(resp.read())
+        except (urllib.error.URLError, OSError, ValueError):
             return False
-        for line in out.stdout.splitlines()[1:]:
-            if line.split() and line.split()[0] == name:
-                return True
-        return False
+        wanted = name if ":" in name else f"{name}:latest"
+        return any(m.get("name") == wanted for m in payload.get("models", []))
 
     def _wait_daemon(self, env: dict, timeout: float = 120) -> None:
         deadline = time.time() + timeout
