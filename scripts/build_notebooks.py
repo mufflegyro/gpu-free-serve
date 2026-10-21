@@ -211,7 +211,7 @@ Edit > Clear all outputs first.
 
 
 # ---------------------------------------------------------------------------
-# sharp-spark-128k: a GGUF-only community model imported into Ollama at 128k.
+# sharp-spark-128k: a GGUF-only custom-architecture model, imported into Ollama at 128k.
 #
 # vLLM cannot serve it (the repo ships no config.json, and the base model is a
 # custom architecture), so this notebook creates a local Ollama model from the
@@ -223,9 +223,9 @@ SHARP_SPARK_REPO = os.environ.get(
     "GPUFREE_SHARP_SPARK_REPO", "https://github.com/mufflegyro/gpu-free-serve.git"
 )
 
-SHARP_GGUF_REPO = "peculiar-ragdoll/Sharp-Spark-X2.5-4B-GGUF"
-SHARP_GGUF_FILE = "Sharp-Spark-X2.5-4B-Q5_K_XL.gguf"
-SHARP_MODEL = "sharp-spark-q5-128k"
+SHARP_GGUF_REPO = "XHToken/Spark-X2.6-4B-GGUF"
+SHARP_GGUF_FILE = "Spark-X2.6-4B-Q8_0.gguf"
+SHARP_MODEL = "spark-x2.6-q8-128k"
 SHARP_CTX = 131072
 
 
@@ -255,23 +255,31 @@ def build_sharp_spark(platform: str) -> dict:
         md(
             fill(
                 """
-# gpu-free-serve — Sharp-Spark-X2.5-4B at 128k (__TITLE__)
+# gpu-free-serve — Spark-X2.6-4B at 128k (__TITLE__)
 
-Boots [peculiar-ragdoll/Sharp-Spark-X2.5-4B-GGUF](https://huggingface.co/peculiar-ragdoll/Sharp-Spark-X2.5-4B-GGUF)
+Boots [XHToken/Spark-X2.6-4B-GGUF](https://huggingface.co/XHToken/Spark-X2.6-4B-GGUF)
 on this notebook's free GPU and exposes an OpenAI-compatible endpoint.
 
 **Before running:** __ACCEL__
 
-Why this notebook exists: that repo contains **only `.gguf` files** — no
-`config.json`, no tokenizer — and its base model `XHToken/Spark-X2.5-4B` is a
-custom architecture (`Spark2_5ForCausalLM`). vLLM rejects both, so this is the
-Ollama (llama.cpp) route: download the GGUF, `ollama create` it with a 128k
-context, then serve it.
+Why this notebook exists: the model is a custom architecture
+(`Spark2_5ForCausalLM`, repo-supplied `modeling_spark.py`), which vLLM cannot
+execute, and its quantised releases elsewhere are MLX (Apple-silicon only — an
+`mlx`/`safetensors` repo will never load on a T4). GGUF is the format CUDA can
+actually run, so this is the Ollama (llama.cpp) route: download the GGUF,
+`ollama create` it with a 128k context, then serve it.
+
+Quant choice. This notebook uses **Q8_0 (4.07 GiB)**, the closest GGUF gets to
+the 6-bit/8-bit weights people reach for on other stacks. Others in the same
+repo, if you want to trade size for speed:
+
+* `Spark-X2.6-4B-Q4_K_M.gguf` — 3.30 GiB, fastest, smallest KV headroom.
+* `Spark-X2.6-4B.gguf` — 7.66 GiB, essentially unquantised; still fits a T4 at
+  128k with a q8_0 cache (~10 GiB total), just slower per token.
 
 The context is cheap here: the model is native to 1M positions, only 9 of its
 36 layers are full attention (27 are sliding-window at 512 tokens) and it has 4
-KV heads, so a 128k cache costs ~4.6 GiB f16 — about 7.6 GiB total with the
-weights, i.e. one T4.
+KV heads, so a 128k cache costs ~4.6 GiB f16 / ~2.3 GiB at q8_0.
 """
             )
         ),
@@ -288,7 +296,7 @@ if os.path.isdir("gpu-free-serve"):
 else:
     subprocess.run(["git", "clone", "--depth", "1", "__REPO__"], check=True)
 os.chdir("__WORKDIR__/gpu-free-serve")
-print(os.getcwd())
+print(os.getcwd(), subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())
 """
             )
         ),
@@ -297,18 +305,24 @@ print(os.getcwd())
             """
 ## Import the GGUF into Ollama
 
-Downloads ~3 GiB of weights, then creates a local model with `num_ctx` baked
+Downloads ~4 GiB of weights, then creates a local model with `num_ctx` baked
 into it (so the context survives restarts and applies to every request).
 
 `ollama create` needs a running daemon, so this starts a throwaway one on port
 11435 — the daemon gpufree starts in the serve cell owns 11434, and two on one
 port is an "address already in use" failure.
+
+The cell ends by asking that daemon to list its models and **fails loudly** if
+the import did not take. Skipping this check is how the serve cell ends up
+trying to `ollama pull` a model that does not exist upstream:
+
+    Error: pull model manifest: file does not exist
 """
         ),
         code(
             fill(
                 """
-import os, shutil, subprocess, time, urllib.request
+import json, os, shutil, subprocess, time, urllib.request
 
 work = "__WORKDIR__"
 model_name = "__MODEL__"
@@ -323,16 +337,16 @@ if not shutil.which("ollama"):
 # 2. Weights.
 from huggingface_hub import hf_hub_download
 gguf = hf_hub_download("__GGUF_REPO__", "__GGUF_FILE__", local_dir=os.path.join(work, "gguf"))
-print("gguf:", gguf)
+print("gguf:", gguf, round(os.path.getsize(gguf) / 2**30, 2), "GiB")
 
 # 3. Modelfile: the context lives here, not in a cell we have to remember to re-run.
-modelfile = os.path.join(work, "Modelfile.sharp-spark")
+modelfile = os.path.join(work, "Modelfile.spark-x2.6")
 with open(modelfile, "w") as fh:
     print("FROM", gguf, file=fh)
     print("PARAMETER num_ctx", num_ctx, file=fh)
     print("PARAMETER num_batch 1024", file=fh)
 
-# 4. Throwaway daemon on our own port, then create + inspect + stop.
+# 4. Throwaway daemon on our own port, then create + verify + inspect + stop.
 env = dict(os.environ, OLLAMA_HOST="127.0.0.1:11435")
 logpath = os.path.join(work, "ollama-import.log")
 log = open(logpath, "w")
@@ -346,8 +360,22 @@ try:
             time.sleep(1)
     else:
         raise RuntimeError("ollama did not start on 11435 — see " + logpath)
-    subprocess.run(["ollama", "create", model_name, "-f", modelfile], env=env, check=True)
+
+    created = subprocess.run(["ollama", "create", model_name, "-f", modelfile], env=env, check=False)
     subprocess.run(["ollama", "show", model_name], env=env, check=False)
+
+    # 5. Verify it landed, via the API (the CLI truncates long names in `list`).
+    with urllib.request.urlopen("http://127.0.0.1:11435/api/tags", timeout=15) as resp:
+        names = [m["name"] for m in json.loads(resp.read()).get("models", [])]
+    print("local models:", names)
+    if model_name + ":latest" not in names and model_name not in names:
+        log.flush()
+        print(open(logpath).read()[-4000:])
+        raise RuntimeError(
+            "ollama create did not register " + model_name + " (exit "
+            + str(created.returncode) + "). The log above says why — an unknown "
+            "architecture in this Ollama build cannot be fixed from the notebook."
+        )
 finally:
     daemon.terminate()
     try:
@@ -357,9 +385,9 @@ finally:
     log.close()
 
 # `ollama show` above prints a TEMPLATE section when the GGUF carries a chat
-# template. If it comes back empty, append the repo's chat_template.jinja to the
-# Modelfile and re-run `ollama create` — otherwise chat formatting is generic
-# and this model's prompt template is wasted.
+# template. If it came back empty, append chat_template.jinja from the HF repo
+# to the Modelfile and re-run `ollama create` — otherwise chat formatting is
+# generic and this model's prompt template is wasted.
 """
             )
         ),
@@ -380,6 +408,10 @@ Verify the context actually took from the log printed by the next cell:
 `llama_context: n_ctx = 131072` and two `llama_kv_cache_iswa` lines (one sized
 to 131072, one to 512). If `n_ctx` is smaller, the fit was reduced — lower
 `num_ctx` in the Modelfile.
+
+The next cell should also print `[gpufree] <model> is already local; skipping
+the pull.` If it prints `Pulling ...` instead, the import cell did not take and
+the pull will fail.
 """
         ),
         code(
@@ -416,8 +448,8 @@ gpufree proxy                                          # http://127.0.0.1:8787/v
 ```
 
 Long prompts are the point of this notebook: prefill of a genuinely 128k-token
-prompt costs a minute or two on a T4, then keeps generating at full speed — the
-sliding-window layers mean per-token attention stays cheap even at that length.
+prompt costs a minute or two on a T4, then generation stays fast — the
+sliding-window layers mean per-token attention is cheap even at that length.
 
 **Two warnings.** Kaggle meters GPU-hours whether or not the model is busy, so
 stop the session when you are done (closing the tab does not stop it). And this
